@@ -712,3 +712,4 @@ sudo -u postgres psql -c "DROP DATABASE IF EXISTS analytics_db;"
 
 sudo -u postgres psql -f database/bootstrap.sql
 ```
+# 7-Microservice-Project-with-docker-compose
