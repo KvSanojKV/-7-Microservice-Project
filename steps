@@ -1,0 +1,695 @@
+PostgreSQL
+    │
+    │ Port 5432
+    │
+    ▼
+EC2 Host
+    │
+    │ host.docker.internal
+    │
+    ▼
+Docker Network: microservices-net
+    │
+    ├── catalog-service       :8082
+    ├── inventory-service     :8083
+    ├── notification-service
+    ├── auth-service
+    ├── order-service
+    ├── payment-service
+    ├── analytics-service
+    │
+    └── frontend
+
+The critical point is:
+
+PostgreSQL = EC2 HOST
+Microservices = Docker containers
+
+Therefore, containers must not use:
+
+127.0.0.1:5432
+
+They must use:
+
+host.docker.internal:5432
+STEP 1 — Go to the project
+cd ~/7-Microservice-Project
+
+Verify:
+
+pwd
+
+Expected:
+
+/home/ubuntu/7-Microservice-Project
+
+Check project:
+
+ls
+
+You should see directories/files such as:
+
+services
+database
+...
+STEP 2 — Start PostgreSQL
+
+Your PostgreSQL is installed directly on Ubuntu/EC2.
+
+Start it:
+
+sudo systemctl start postgresql
+
+Check status:
+
+sudo systemctl status postgresql
+
+You want:
+
+Active: active
+
+active (exited) can be normal for the Debian/Ubuntu PostgreSQL wrapper service; the actual PostgreSQL cluster can still be running.
+
+STEP 3 — Verify PostgreSQL port
+
+Run:
+
+sudo ss -lntp | grep 5432
+
+You should see PostgreSQL listening on port:
+
+5432
+STEP 4 — Verify PostgreSQL databases
+
+Run:
+
+sudo -u postgres psql -c "\l"
+
+Your project should have:
+
+analytics_db
+auth_db
+catalog_db
+inventory_db
+notification_db
+order_db
+payment_db
+postgres
+
+You previously confirmed these databases exist.
+
+STEP 5 — Verify microapp user
+
+Run:
+
+sudo -u postgres psql -c "\du"
+
+You should see:
+
+microapp
+
+The application connection uses:
+
+Username: microapp
+Password: microapp123
+STEP 6 — Bootstrap database if required
+
+If this is a fresh installation or the databases are missing:
+
+cd ~/7-Microservice-Project
+sudo -u postgres psql -f database/bootstrap.sql
+
+Then verify:
+
+sudo -u postgres psql -c "\l"
+STEP 7 — Create Docker network
+
+Check:
+
+docker network ls
+
+Look for:
+
+microservices-net
+
+If it doesn't exist:
+
+docker network create microservices-net
+
+Verify:
+
+docker network inspect microservices-net
+STEP 8 — Understand the original problem
+
+Initially Catalog had:
+
+postgres://microapp:microapp123@127.0.0.1:5432/catalog_db
+
+Inventory had:
+
+postgres://microapp:microapp123@127.0.0.1:5432/inventory_db
+
+This caused:
+
+ECONNREFUSED 127.0.0.1:5432
+
+Why?
+
+Inside Docker:
+
+catalog container
+       │
+       └── 127.0.0.1
+              ↓
+       catalog container
+
+It does not mean:
+
+EC2 host
+
+So we added:
+
+--add-host=host.docker.internal:host-gateway
+
+and changed the database host to:
+
+host.docker.internal
+STEP 9 — Verify Catalog configuration
+
+Check source:
+
+grep -n -E "DATABASE|DB_|postgres|5432|process.env" \
+services/catalog-service/main.go
+
+We found:
+
+getenv("CATALOG_DB_DSN", "postgres://microapp:microapp123@127.0.0.1:5432/catalog_db?sslmode=disable")
+
+Therefore the environment variable is:
+
+CATALOG_DB_DSN
+STEP 10 — Start Catalog
+
+First remove an old failed container if it exists:
+
+docker rm -f catalog-service 2>/dev/null
+
+Start it:
+
+docker run -d \
+  --name catalog-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e CATALOG_DB_DSN="postgres://microapp:microapp123@host.docker.internal:5432/catalog_db?sslmode=disable" \
+  -p 8082:8082 \
+  devops-shack/catalog-service:1.0
+STEP 11 — Verify Catalog
+
+Check:
+
+docker ps
+
+You want:
+
+catalog-service    Up
+
+Check logs:
+
+docker logs catalog-service
+
+You should not see:
+
+127.0.0.1:5432
+connection refused
+
+Check environment:
+
+docker inspect catalog-service \
+  --format '{{json .Config.Env}}'
+
+You should see:
+
+CATALOG_DB_DSN=postgres://microapp:microapp123@host.docker.internal:5432/catalog_db...
+STEP 12 — Verify Inventory configuration
+
+This was important because we initially used the wrong variable.
+
+Run:
+
+grep -n -E "DATABASE|DB_|postgres|5432|process.env" \
+services/inventory-service/src/index.js
+
+We found:
+
+connectionString: process.env.INVENTORY_DB_URL ||
+"postgres://microapp:microapp123@127.0.0.1:5432/inventory_db"
+
+Therefore the correct variable is:
+
+INVENTORY_DB_URL
+
+Not:
+
+INVENTORY_DB_DSN
+STEP 13 — Start Inventory
+
+Remove old container:
+
+docker rm -f inventory-service 2>/dev/null
+
+Run:
+
+docker run -d \
+  --name inventory-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e INVENTORY_DB_URL="postgres://microapp:microapp123@host.docker.internal:5432/inventory_db" \
+  -p 8083:8083 \
+  devops-shack/inventory-service:1.0
+STEP 14 — Verify Inventory
+docker ps
+
+Expected:
+
+inventory-service    Up
+
+Check:
+
+docker logs inventory-service
+
+There should be no:
+
+ECONNREFUSED 127.0.0.1:5432
+
+Verify environment:
+
+docker inspect inventory-service \
+  --format '{{json .Config.Env}}'
+STEP 15 — Find the remaining 5 services
+
+Before starting them, do not guess their database variables.
+
+Run:
+
+grep -R -n -E \
+"127.0.0.1:5432|localhost.*5432|process.env|DB_URL|DB_DSN|DATABASE_URL" \
+services/ 2>/dev/null
+
+This identifies the exact database configuration for:
+
+notification-service
+auth-service
+order-service
+payment-service
+analytics-service
+
+For every service, determine:
+
+1. Image name
+2. Container name
+3. Application port
+4. Database name
+5. Environment variable
+6. Database URL format
+
+For example:
+
+Service             Database             Variable
+-----------------------------------------------------------
+catalog             catalog_db           CATALOG_DB_DSN
+inventory           inventory_db         INVENTORY_DB_URL
+notification        notification_db      ???????
+auth                auth_db              ???????
+order               order_db             ???????
+payment             payment_db           ???????
+analytics           analytics_db         ???????
+
+We should get these exact five values from your source code rather than assume them.
+
+STEP 16 — Find all Docker images
+
+Run:
+
+docker images
+
+Or easier:
+
+docker images --format \
+"table {{.Repository}}\t{{.Tag}}\t{{.ID}}"
+
+You should find images similar to:
+
+devops-shack/catalog-service
+devops-shack/inventory-service
+devops-shack/notification-service
+devops-shack/auth-service
+devops-shack/order-service
+devops-shack/payment-service
+devops-shack/analytics-service
+devops-shack/frontend
+
+Use the actual names shown by your machine.
+
+STEP 17 — Start Notification
+
+Once we know its environment variable, the pattern is:
+
+docker run -d \
+  --name notification-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/notification_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+
+Then:
+
+docker ps
+
+and:
+
+docker logs notification-service
+STEP 18 — Start Auth
+
+Same pattern:
+
+docker run -d \
+  --name auth-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/auth_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+
+Verify:
+
+docker logs auth-service
+STEP 19 — Start Order
+
+Database:
+
+order_db
+
+Pattern:
+
+docker run -d \
+  --name order-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/order_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+
+Verify:
+
+docker logs order-service
+STEP 20 — Start Payment
+
+Database:
+
+payment_db
+
+Pattern:
+
+docker run -d \
+  --name payment-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/payment_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+
+Verify:
+
+docker logs payment-service
+STEP 21 — Start Analytics
+
+Database:
+
+analytics_db
+
+Pattern:
+
+docker run -d \
+  --name analytics-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/analytics_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+
+Verify:
+
+docker logs analytics-service
+STEP 22 — Start Frontend
+
+First find the frontend image:
+
+docker images
+
+Check its Dockerfile/config to determine the port:
+
+find . -iname "Dockerfile" -o -iname "docker-compose.yml" -o -iname "compose.yaml"
+
+Then start it according to its actual port.
+
+For example, if frontend listens on port 3000:
+
+docker run -d \
+  --name frontend \
+  --network microservices-net \
+  -p 3000:3000 \
+  <frontend-image>:<tag>
+
+If it uses nginx on port 80:
+
+docker run -d \
+  --name frontend \
+  --network microservices-net \
+  -p 80:80 \
+  <frontend-image>:<tag>
+
+Don't assume 3000 or 80 until we check your frontend.
+
+STEP 23 — Check all 8 containers
+
+Run:
+
+docker ps
+
+You ultimately want:
+
+catalog-service
+inventory-service
+notification-service
+auth-service
+order-service
+payment-service
+analytics-service
+frontend
+
+All should show:
+
+Up
+STEP 24 — Better formatted check
+
+Use:
+
+docker ps -a --format \
+"table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+Example:
+
+NAMES                  STATUS
+catalog-service        Up
+inventory-service      Up
+notification-service   Up
+auth-service           Up
+order-service          Up
+payment-service        Up
+analytics-service     Up
+frontend               Up
+STEP 25 — If a container exits
+
+Never immediately recreate everything.
+
+First:
+
+docker ps -a
+
+Find:
+
+Exited (1)
+
+Then:
+
+docker logs <container-name>
+
+For example:
+
+docker logs inventory-service
+
+If you see:
+
+ECONNREFUSED 127.0.0.1:5432
+
+check its source:
+
+grep -n -E "DATABASE|DB_|postgres|5432|process.env" \
+services/inventory-service/src/index.js
+
+Find the expected environment variable.
+
+Then recreate that one container.
+
+STEP 26 — Important container recreation rule
+
+If a container already exists:
+
+docker run ...
+
+will give:
+
+Conflict. The container name is already in use.
+
+Do:
+
+docker rm -f <container-name>
+
+Then run the docker run command again.
+
+For example:
+
+docker rm -f inventory-service
+
+then:
+
+docker run ...
+STEP 27 — Important: docker ps vs docker ps -a
+
+Remember:
+
+docker ps
+
+shows running containers only.
+
+docker ps -a
+
+shows:
+
+running
+stopped
+exited
+
+So if you don't see a service in:
+
+docker ps
+
+check:
+
+docker ps -a
+STEP 28 — Daily startup after everything is created
+
+Once all 8 containers have been successfully created, you don't need to use all the long docker run commands every time.
+
+Start PostgreSQL:
+
+sudo systemctl start postgresql
+
+Start Docker services:
+
+docker start catalog-service
+docker start inventory-service
+docker start notification-service
+docker start auth-service
+docker start order-service
+docker start payment-service
+docker start analytics-service
+docker start frontend
+
+Then:
+
+docker ps
+STEP 29 — Daily shutdown
+
+Stop application containers:
+
+docker stop \
+  catalog-service \
+  inventory-service \
+  notification-service \
+  auth-service \
+  order-service \
+  payment-service \
+  analytics-service \
+  frontend
+
+You don't necessarily need to stop PostgreSQL unless you specifically want to:
+
+sudo systemctl stop postgresql
+⭐ The exact lesson from today's troubleshooting
+Problem
+catalog-service
+       ↓
+127.0.0.1:5432
+       ↓
+❌
+Solution
+catalog-service
+       ↓
+host.docker.internal:5432
+       ↓
+EC2 PostgreSQL
+       ↓
+catalog_db
+       ↓
+✅
+
+We achieved this using:
+
+--add-host=host.docker.internal:host-gateway
+
+and:
+
+-e CATALOG_DB_DSN="postgres://microapp:microapp123@host.docker.internal:5432/catalog_db?sslmode=disable"
+
+For inventory:
+
+--add-host=host.docker.internal:host-gateway
+
+and:
+
+-e INVENTORY_DB_URL="postgres://microapp:microapp123@host.docker.internal:5432/inventory_db"
+Most important rule to remember
+Docker container → EC2 PostgreSQL
+                         ↑
+                         |
+               host.docker.internal
+
+Not:
+
+127.0.0.1
+🔴 One thing I don't want to guess
+
+We have verified the exact commands for Catalog and Inventory, but we haven't yet inspected the other five services and frontend in this conversation.
+
+To make your runbook 100% exact for all 8 containers, run this single command:
+
+cd ~/7-Microservice-Project
+
+echo "===== IMAGES ====="
+docker images --format "table {{.Repository}}\t{{.Tag}}"
+
+echo "===== DATABASE CONFIG ====="
+grep -R -n -E \
+"127.0.0.1:5432|localhost.*5432|process.env|DB_URL|DB_DSN|DATABASE_URL" \
+services/ 2>/dev/null
+
+echo "===== DOCKERFILES ====="
+find . -iname "Dockerfile" -o -iname "docker-compose.yml" -o -iname "compose.yaml"
+
+Paste that output. Then I can give you the final version with:
+
+STEP 1 → PostgreSQL → STEP 2 → Network → STEP 3 → Catalog → STEP 4 → Inventory → STEP 5 → Notification → STEP 6 → Auth → STEP 7 → Order → STEP 8 → Payment → STEP 9 → Analytics → STEP 10 → Frontend → STEP 11 → Verify all 8
+
+with every exact docker run command, including ports and environment variables, so you can use it as your permanent project reference.
