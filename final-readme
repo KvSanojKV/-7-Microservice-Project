@@ -1,0 +1,964 @@
+# 🚀 Microservices Application – Docker Deployment on AWS EC2
+
+A practical deployment and troubleshooting guide for running a multi-service microservices application using **Docker on AWS EC2**, with **PostgreSQL installed directly on the EC2 host**.
+
+---
+
+## 📌 Architecture
+
+```text
+                         ┌─────────────────┐
+                         │   PostgreSQL    │
+                         │    EC2 Host     │
+                         │    Port 5432    │
+                         └────────┬────────┘
+                                  │
+                                  │ host.docker.internal
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │    Docker Network         │
+                    │    microservices-net      │
+                    └─────────────┬─────────────┘
+                                  │
+       ┌──────────────────────────┼──────────────────────────┐
+       │                          │                          │
+       ▼                          ▼                          ▼
+ ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
+ │   Catalog   │           │  Inventory  │           │ Notification│
+ │    :8082    │           │    :8083    │           │             │
+ └─────────────┘           └─────────────┘           └─────────────┘
+       │                          │                          │
+       ├──────────────┬───────────┼──────────────┬───────────┤
+       ▼              ▼           ▼              ▼           ▼
+   Auth Service   Order Service  Payment      Analytics    Frontend
+```
+
+### 🔑 Important Architecture Rule
+
+PostgreSQL runs directly on the EC2 host, while the application services run inside Docker containers.
+
+Therefore, containers **must not use**:
+
+```text
+127.0.0.1:5432
+```
+
+Instead, they connect to PostgreSQL through:
+
+```text
+host.docker.internal:5432
+```
+
+The Docker host mapping is created using:
+
+```bash
+--add-host=host.docker.internal:host-gateway
+```
+
+---
+
+# 🛠️ Prerequisites
+
+Make sure the EC2 instance has:
+
+* Ubuntu Linux
+* Docker
+* PostgreSQL
+* Git
+* Application source code
+* Required Docker images
+
+Verify:
+
+```bash
+docker --version
+psql --version
+git --version
+```
+
+---
+
+# 📁 Project Structure
+
+```text
+7-Microservice-Project/
+├── services/
+│   ├── catalog-service/
+│   ├── inventory-service/
+│   ├── notification-service/
+│   ├── auth-service/
+│   ├── order-service/
+│   ├── payment-service/
+│   ├── analytics-service/
+│   └── frontend/
+│
+└── database/
+    └── bootstrap.sql
+```
+
+---
+
+# 1️⃣ Go to the Project
+
+```bash
+cd ~/7-Microservice-Project
+```
+
+Verify:
+
+```bash
+pwd
+ls
+```
+
+Expected:
+
+```text
+/home/ubuntu/7-Microservice-Project
+```
+
+---
+
+# 2️⃣ Start PostgreSQL
+
+PostgreSQL is installed directly on the EC2 instance.
+
+Start PostgreSQL:
+
+```bash
+sudo systemctl start postgresql
+```
+
+Check status:
+
+```bash
+sudo systemctl status postgresql
+```
+
+Expected:
+
+```text
+Active: active
+```
+
+> `active (exited)` can be normal for the Debian/Ubuntu PostgreSQL wrapper service. The PostgreSQL cluster can still be running.
+
+---
+
+# 3️⃣ Verify PostgreSQL Port
+
+```bash
+sudo ss -lntp | grep 5432
+```
+
+PostgreSQL should be listening on:
+
+```text
+5432
+```
+
+---
+
+# 4️⃣ Verify PostgreSQL Databases
+
+```bash
+sudo -u postgres psql -c "\l"
+```
+
+Expected project databases:
+
+```text
+analytics_db
+auth_db
+catalog_db
+inventory_db
+notification_db
+order_db
+payment_db
+postgres
+```
+
+---
+
+# 5️⃣ Verify Database User
+
+```bash
+sudo -u postgres psql -c "\du"
+```
+
+Expected user:
+
+```text
+microapp
+```
+
+Application credentials:
+
+```text
+Username: microapp
+Password: microapp123
+```
+
+> ⚠️ For production environments, use a secure secret-management solution instead of storing passwords directly in commands or documentation.
+
+---
+
+# 6️⃣ Bootstrap the Database
+
+If this is a fresh installation or databases are missing:
+
+```bash
+cd ~/7-Microservice-Project
+
+sudo -u postgres psql -f database/bootstrap.sql
+```
+
+Verify:
+
+```bash
+sudo -u postgres psql -c "\l"
+```
+
+---
+
+# 7️⃣ Create the Docker Network
+
+Check existing Docker networks:
+
+```bash
+docker network ls
+```
+
+Look for:
+
+```text
+microservices-net
+```
+
+If it does not exist:
+
+```bash
+docker network create microservices-net
+```
+
+Verify:
+
+```bash
+docker network inspect microservices-net
+```
+
+---
+
+# 🐳 8️⃣ Catalog Service
+
+## Database Configuration
+
+Catalog originally attempted to connect to:
+
+```text
+127.0.0.1:5432
+```
+
+Inside a Docker container, `127.0.0.1` refers to the **container itself**, not the EC2 host.
+
+Correct configuration:
+
+```text
+host.docker.internal:5432
+```
+
+Check the application configuration:
+
+```bash
+grep -n -E "DATABASE|DB_|postgres|5432|process.env" \
+services/catalog-service/main.go
+```
+
+Environment variable:
+
+```text
+CATALOG_DB_DSN
+```
+
+## Start Catalog
+
+```bash
+docker rm -f catalog-service 2>/dev/null
+
+docker run -d \
+  --name catalog-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e CATALOG_DB_DSN="postgres://microapp:microapp123@host.docker.internal:5432/catalog_db?sslmode=disable" \
+  -p 8082:8082 \
+  devops-shack/catalog-service:1.0
+```
+
+Verify:
+
+```bash
+docker ps
+docker logs catalog-service
+```
+
+Check environment:
+
+```bash
+docker inspect catalog-service \
+  --format '{{json .Config.Env}}'
+```
+
+---
+
+# 📦 9️⃣ Inventory Service
+
+Check the source configuration:
+
+```bash
+grep -n -E "DATABASE|DB_|postgres|5432|process.env" \
+services/inventory-service/src/index.js
+```
+
+Correct environment variable:
+
+```text
+INVENTORY_DB_URL
+```
+
+> ⚠️ Do not use `INVENTORY_DB_DSN`.
+
+## Start Inventory
+
+```bash
+docker rm -f inventory-service 2>/dev/null
+
+docker run -d \
+  --name inventory-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e INVENTORY_DB_URL="postgres://microapp:microapp123@host.docker.internal:5432/inventory_db" \
+  -p 8083:8083 \
+  devops-shack/inventory-service:1.0
+```
+
+Verify:
+
+```bash
+docker ps
+docker logs inventory-service
+```
+
+---
+
+# 🔍 🔟 Discover Remaining Services
+
+Before starting the remaining services, inspect their actual configuration instead of guessing environment variable names.
+
+```bash
+grep -R -n -E \
+"127.0.0.1:5432|localhost.*5432|process.env|DB_URL|DB_DSN|DATABASE_URL" \
+services/ 2>/dev/null
+```
+
+Determine the following for every service:
+
+| Service      | Database          | Environment Variable | Port   |
+| ------------ | ----------------- | -------------------- | ------ |
+| Catalog      | `catalog_db`      | `CATALOG_DB_DSN`     | `8082` |
+| Inventory    | `inventory_db`    | `INVENTORY_DB_URL`   | `8083` |
+| Notification | `notification_db` | Verify source        | Verify |
+| Auth         | `auth_db`         | Verify source        | Verify |
+| Order        | `order_db`        | Verify source        | Verify |
+| Payment      | `payment_db`      | Verify source        | Verify |
+| Analytics    | `analytics_db`    | Verify source        | Verify |
+| Frontend     | N/A               | Verify configuration | Verify |
+
+---
+
+# 🐳 1️⃣1️⃣ Verify Docker Images
+
+```bash
+docker images
+```
+
+Or:
+
+```bash
+docker images --format \
+"table {{.Repository}}\t{{.Tag}}\t{{.ID}}"
+```
+
+Expected images include:
+
+```text
+devops-shack/catalog-service
+devops-shack/inventory-service
+devops-shack/notification-service
+devops-shack/auth-service
+devops-shack/order-service
+devops-shack/payment-service
+devops-shack/analytics-service
+devops-shack/frontend
+```
+
+> Always use the actual image names and tags available on your machine.
+
+---
+
+# 🔔 1️⃣2️⃣ Notification Service
+
+Database:
+
+```text
+notification_db
+```
+
+General deployment pattern:
+
+```bash
+docker run -d \
+  --name notification-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/notification_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+```
+
+Verify:
+
+```bash
+docker ps
+docker logs notification-service
+```
+
+---
+
+# 🔐 1️⃣3️⃣ Auth Service
+
+Database:
+
+```text
+auth_db
+```
+
+Deployment pattern:
+
+```bash
+docker run -d \
+  --name auth-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/auth_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+```
+
+Verify:
+
+```bash
+docker logs auth-service
+```
+
+---
+
+# 📦 1️⃣4️⃣ Order Service
+
+Database:
+
+```text
+order_db
+```
+
+Deployment pattern:
+
+```bash
+docker run -d \
+  --name order-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/order_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+```
+
+Verify:
+
+```bash
+docker logs order-service
+```
+
+---
+
+# 💳 1️⃣5️⃣ Payment Service
+
+Database:
+
+```text
+payment_db
+```
+
+Deployment pattern:
+
+```bash
+docker run -d \
+  --name payment-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/payment_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+```
+
+Verify:
+
+```bash
+docker logs payment-service
+```
+
+---
+
+# 📊 1️⃣6️⃣ Analytics Service
+
+Database:
+
+```text
+analytics_db
+```
+
+Deployment pattern:
+
+```bash
+docker run -d \
+  --name analytics-service \
+  --network microservices-net \
+  --add-host=host.docker.internal:host-gateway \
+  -e <VARIABLE>="postgres://microapp:microapp123@host.docker.internal:5432/analytics_db" \
+  -p <PORT>:<PORT> \
+  <IMAGE>:<TAG>
+```
+
+Verify:
+
+```bash
+docker logs analytics-service
+```
+
+---
+
+# 🌐 1️⃣7️⃣ Frontend
+
+Find the frontend configuration:
+
+```bash
+find . -iname "Dockerfile" \
+-o -iname "docker-compose.yml" \
+-o -iname "compose.yaml"
+```
+
+Check the Docker image:
+
+```bash
+docker images
+```
+
+If the application listens on port `3000`:
+
+```bash
+docker run -d \
+  --name frontend \
+  --network microservices-net \
+  -p 3000:3000 \
+  <frontend-image>:<tag>
+```
+
+If it uses Nginx on port `80`:
+
+```bash
+docker run -d \
+  --name frontend \
+  --network microservices-net \
+  -p 80:80 \
+  <frontend-image>:<tag>
+```
+
+> ⚠️ Verify the actual frontend port before deployment.
+
+---
+
+# ✅ 1️⃣8️⃣ Verify All Containers
+
+Run:
+
+```bash
+docker ps
+```
+
+Expected services:
+
+```text
+catalog-service
+inventory-service
+notification-service
+auth-service
+order-service
+payment-service
+analytics-service
+frontend
+```
+
+All services should show:
+
+```text
+Up
+```
+
+For a cleaner view:
+
+```bash
+docker ps -a --format \
+"table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+---
+
+# 🚨 Troubleshooting
+
+## Container Not Running
+
+First check:
+
+```bash
+docker ps -a
+```
+
+Look for:
+
+```text
+Exited (1)
+```
+
+Then inspect logs:
+
+```bash
+docker logs <container-name>
+```
+
+Example:
+
+```bash
+docker logs inventory-service
+```
+
+---
+
+## PostgreSQL Connection Refused
+
+If you see:
+
+```text
+ECONNREFUSED 127.0.0.1:5432
+```
+
+remember:
+
+```text
+Docker Container
+      │
+      │ 127.0.0.1
+      ▼
+Container itself ❌
+```
+
+Correct:
+
+```text
+Docker Container
+      │
+      │ host.docker.internal
+      ▼
+EC2 Host
+      │
+      │ :5432
+      ▼
+PostgreSQL ✅
+```
+
+---
+
+# 🔄 Container Recreation
+
+If you see:
+
+```text
+Conflict. The container name is already in use.
+```
+
+Remove the existing container:
+
+```bash
+docker rm -f <container-name>
+```
+
+Then recreate it:
+
+```bash
+docker run ...
+```
+
+Example:
+
+```bash
+docker rm -f inventory-service
+```
+
+---
+
+# 🔎 `docker ps` vs `docker ps -a`
+
+### Running containers
+
+```bash
+docker ps
+```
+
+Shows only running containers.
+
+### All containers
+
+```bash
+docker ps -a
+```
+
+Shows:
+
+* Running
+* Stopped
+* Exited
+
+---
+
+# ▶️ Daily Startup
+
+After all containers have been created successfully, you don't need to repeat the complete `docker run` commands.
+
+Start PostgreSQL:
+
+```bash
+sudo systemctl start postgresql
+```
+
+Start application containers:
+
+```bash
+docker start catalog-service
+docker start inventory-service
+docker start notification-service
+docker start auth-service
+docker start order-service
+docker start payment-service
+docker start analytics-service
+docker start frontend
+```
+
+Verify:
+
+```bash
+docker ps
+```
+
+---
+
+# 🛑 Daily Shutdown
+
+Stop application containers:
+
+```bash
+docker stop \
+  catalog-service \
+  inventory-service \
+  notification-service \
+  auth-service \
+  order-service \
+  payment-service \
+  analytics-service \
+  frontend
+```
+
+PostgreSQL can remain running.
+
+If required:
+
+```bash
+sudo systemctl stop postgresql
+```
+
+---
+
+# ⭐ Key Lesson
+
+## ❌ Incorrect
+
+```text
+Docker Container
+       │
+       ▼
+127.0.0.1:5432
+       │
+       ▼
+Connection Refused
+```
+
+## ✅ Correct
+
+```text
+Docker Container
+       │
+       ▼
+host.docker.internal:5432
+       │
+       ▼
+EC2 Host
+       │
+       ▼
+PostgreSQL
+       │
+       ▼
+Application Database
+```
+
+Docker host mapping:
+
+```bash
+--add-host=host.docker.internal:host-gateway
+```
+
+---
+
+# 🧠 Important Commands Cheat Sheet
+
+| Task                     | Command                                    |
+| ------------------------ | ------------------------------------------ |
+| Check running containers | `docker ps`                                |
+| Check all containers     | `docker ps -a`                             |
+| View logs                | `docker logs <container>`                  |
+| Follow logs              | `docker logs -f <container>`               |
+| List images              | `docker images`                            |
+| List networks            | `docker network ls`                        |
+| Inspect network          | `docker network inspect microservices-net` |
+| Create network           | `docker network create microservices-net`  |
+| Start container          | `docker start <container>`                 |
+| Stop container           | `docker stop <container>`                  |
+| Remove container         | `docker rm -f <container>`                 |
+| Inspect container        | `docker inspect <container>`               |
+| Start PostgreSQL         | `sudo systemctl start postgresql`          |
+| PostgreSQL status        | `sudo systemctl status postgresql`         |
+| Check port 5432          | `sudo ss -lntp \| grep 5432`               |
+
+---
+
+# 🎯 Troubleshooting Checklist
+
+When a service fails:
+
+1. Check whether the container exists.
+
+```bash
+docker ps -a
+```
+
+2. Check the logs.
+
+```bash
+docker logs <service>
+```
+
+3. Check the database configuration.
+
+```bash
+grep -R -n "5432" services/
+```
+
+4. Confirm PostgreSQL is running.
+
+```bash
+sudo systemctl status postgresql
+```
+
+5. Confirm port `5432`.
+
+```bash
+sudo ss -lntp | grep 5432
+```
+
+6. Confirm Docker network.
+
+```bash
+docker network inspect microservices-net
+```
+
+7. Confirm the container uses:
+
+```text
+host.docker.internal
+```
+
+instead of:
+
+```text
+127.0.0.1
+```
+
+8. Recreate **only the affected container**.
+
+---
+
+# 📚 What This Project Demonstrates
+
+This project provides practical experience with:
+
+* 🐳 Docker containers
+* 🌐 Docker networking
+* ☁️ AWS EC2
+* 🗄️ PostgreSQL
+* 🔐 Database connectivity
+* 🔧 Environment variables
+* 🛠️ Linux system administration
+* 🔍 Container troubleshooting
+* 📦 Microservices architecture
+* 🚀 Application deployment
+
+---
+
+## 📌 Final Architecture Summary
+
+```text
+                    AWS EC2
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│  PostgreSQL                                          │
+│  ├── catalog_db                                      │
+│  ├── inventory_db                                    │
+│  ├── notification_db                                 │
+│  ├── auth_db                                         │
+│  ├── order_db                                        │
+│  ├── payment_db                                      │
+│  └── analytics_db                                    │
+│                                                      │
+│             Port 5432                                │
+│                ▲                                     │
+│                │ host.docker.internal                │
+│                │                                     │
+│       Docker Network: microservices-net              │
+│                │                                     │
+│   ┌────────────┼──────────────────────────────┐      │
+│   │            │                              │      │
+│   ▼            ▼                              ▼      │
+│ Catalog    Inventory                    Notification │
+│ :8082      :8083                                  │
+│                                                      │
+│ Auth       Order       Payment       Analytics       │
+│                                                      │
+│                     Frontend                         │
+│
+```
