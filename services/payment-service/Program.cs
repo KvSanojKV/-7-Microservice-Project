@@ -15,7 +15,7 @@ app.UseCors();
 
 var connectionString =
     Environment.GetEnvironmentVariable("PAYMENT_DB_URL")
-    ?? "Host=127.0.0.1;Port=5432;Database=payment_db;Username=microapp;Password=microapp123";
+    ?? "Host=host.docker.internal;Port=5432;Database=payment_db;Username=microapp;Password=microapp123";
 
 var orderUrl = Environment.GetEnvironmentVariable("ORDER_URL") ?? "http://localhost:8084";
 var inventoryUrl = Environment.GetEnvironmentVariable("INVENTORY_URL") ?? "http://localhost:8083";

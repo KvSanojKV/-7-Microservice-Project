@@ -11,7 +11,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 DB_DSN = os.getenv(
     "ORDER_DB_DSN",
-    "dbname=order_db user=microapp password=microapp123 host=127.0.0.1 port=5432",
+    "dbname=order_db user=microapp password=microapp123 host=host.docker.internal port=5432",
 )
 CATALOG_URL = os.getenv("CATALOG_URL", "http://localhost:8082")
 INVENTORY_URL = os.getenv("INVENTORY_URL", "http://localhost:8083")

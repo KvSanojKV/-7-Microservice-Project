@@ -14,7 +14,7 @@ set :protection, except: [:json_csrf]
 
 DB_URL = ENV.fetch(
   "NOTIFICATION_DB_URL",
-  "postgres://microapp:microapp123@127.0.0.1:5432/notification_db"
+  "postgres://microapp:microapp123@host.docker.internal:5432/notification_db"
 )
 
 def db
